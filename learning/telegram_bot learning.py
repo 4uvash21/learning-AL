@@ -11,7 +11,7 @@ from aiogram import F
 logging.basicConfig(level=logging.INFO)
 
 # Замените "YOUR_BOT_TOKEN" на токен, который вы получили от BotFather
-API_TOKEN = '6537558581:AAF1J8V4ab99TzruJXgPWzDqbckw7x-iGRo'
+API_TOKEN = 'YOUR_BOT_TOKEN'
 
 # Объект бота
 bot = Bot(token=API_TOKEN)
