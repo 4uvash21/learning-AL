@@ -1,0 +1,81 @@
+
+from tensorflow.keras.datasets import imdb
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Embedding, Flatten, Dropout, GlobalAveragePooling1D
+from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras import utils
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+%matplotlib inline
+
+
+max_words = 10000
+maxlen = 400
+(x_train, y_train), (x_test, y_test) = imdb.load_data(num_words=max_words)
+
+def create_ngram_set(input_list, ngram_value=2):
+    return set(zip(*[input_list[i:] for i in range(ngram_value)]))
+ngram_range = 2
+
+ngram_set = set()
+for input_list in x_train:
+    for i in range(2, ngram_range + 1):
+        set_of_ngram = create_ngram_set(input_list, ngram_value=i)
+        ngram_set.update(set_of_ngram)
+
+start_index = max_words + 1
+token_indice = {v: k + start_index for k, v in enumerate(ngram_set)}
+indice_token = {token_indice[k]: k for k in token_indice}
+
+max_features = np.max(list(indice_token.keys())) + 1
+max_features
+
+def add_ngram(sequences, token_indice, ngram_range=2):
+    new_sequences = []
+    for input_list in sequences:
+        new_list = input_list[:]
+        for ngram_value in range(2, ngram_range + 1):
+            for i in range(len(new_list) - ngram_value + 1):
+                ngram = tuple(new_list[i:i + ngram_value])
+                if ngram in token_indice:
+                    new_list.append(token_indice[ngram])
+        new_sequences.append(new_list)
+
+    return new_sequences
+
+x_train = add_ngram(x_train, token_indice, ngram_range)
+x_test = add_ngram(x_test, token_indice, ngram_range)
+
+x_train = pad_sequences(x_train, maxlen=maxlen * 2)
+x_test = pad_sequences(x_test, maxlen=maxlen * 2)
+
+model = Sequential()
+model.add(Embedding(max_features, 50, input_length=maxlen * 2))
+model.add(GlobalAveragePooling1D())
+model.add(Dense(1, activation='sigmoid'))
+model.compile(optimizer='Nadam',
+              loss='binary_crossentropy',
+              metrics=['accuracy'])
+
+reduce_lr = ReduceLROnPlateau(monitor='val_accuracy',
+                              factor=0.2,
+                              patience=3,
+                              min_lr=0.00001,
+                              verbose=1)
+
+save_best = ModelCheckpoint(filepath="best_weights.keras",
+                            monitor="val_accuracy",
+                            save_best_only=True,
+                            mode="auto",
+                            verbose=1)
+
+history = model.fit(x_train,
+                    y_train,
+                    epochs=10,
+                    batch_size=128,
+                    validation_split=0.1,
+                    verbose=1,
+                    callbacks=[reduce_lr, save_best])
