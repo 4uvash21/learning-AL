@@ -25,7 +25,7 @@
 
 1. Клонируйте репозиторий:
 ```bash
-git clone https://github.com/4uvash21/learning-AL-and-bot/tree/main/AIChatFutter
+git clone https://github.com/4uvash21/learning-AL/tree/main/AIChatFutter
 cd AIChatFlutter
 ```
 
