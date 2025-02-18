@@ -1,0 +1,130 @@
+# Обучение агента для игры в Ms. Pacman с использованием Gymnasium
+
+Этот проект демонстрирует, как создать и обучить агента для игры в Ms. Pacman с использованием библиотеки Gymnasium. В этом репозитории представлен код, который включает в себя установку необходимых библиотек, создание среды, обучение модели, а также запись и отображение видео.
+
+## Установка
+
+Перед запуском кода, убедитесь, что у вас установлены необходимые библиотеки. Вы можете установить их с помощью следующих команд:
+
+```bash
+!pip install "gymnasium[atari]"
+!pip install autorom[accept-rom-license]
+!pip install --upgrade gym pyvirtualdisplay ipykernel > /dev/null 2>&1
+!pip install gymnasium ale-py
+Создание и инициализация среды
+Код создает среду для игры в Ms. Pacman и отображает первоначальное состояние игры:
+
+import gymnasium as gym
+import ale_py
+import matplotlib.pyplot as plt
+from IPython import display as ipythondisplay
+
+# Создать окружающую среду
+env = gym.make("MsPacman-v4", render_mode='rgb_array')
+
+# Привести среду в исходное состояние
+env.reset()
+
+# Нарисовать первоначальное состояние игры
+prev_screen = env.render()
+plt.imshow(prev_screen)
+Игровой цикл
+Агент выполняет случайные действия в течение 50 шагов или пока игра не завершится:
+
+for i in range(50):
+    action = env.action_space.sample()  # Предпринять случайное действие
+    obs, reward, done, truncated, info = env.step(action)
+    
+    # Нарисовать текущее состояние игры
+    screen = env.render()
+    plt.imshow(screen)
+    
+    # Очищаем вывод ячейки
+    ipythondisplay.clear_output(wait=True)
+    ipythondisplay.display(plt.gcf())
+
+    if done or truncated:
+        break
+
+# Закрыть окружающую среду
+env.close()
+Обучение агента
+Агент обучается на основе случайных действий, и его вознаграждение записывается:
+
+total_rewards = []
+n_episode = 10
+
+for i in range(n_episode):
+    game_rew = 0
+    while True:
+        action = env.action_space.sample()
+        new_obs, rew, done, truncated, _ = env.step(action)
+        game_rew += rew
+        
+        if done or truncated:
+            print('Эпизод %d завершен, Вознаграждение:%d' % (i, game_rew))
+            env.reset()
+            break
+    total_rewards.append(game_rew)
+
+print('Среднее полное вознаграждение в {} эпизодах: {}'.format(n_episode, sum(total_rewards) / n_episode))
+Создание нейронной сети
+Для обучения агента используется простая нейронная сеть:
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+class SimpleNetwork(nn.Module):
+    def __init__(self, n_state, n_action):
+        super(SimpleNetwork, self).__init__()
+        self.fc1 = nn.Linear(n_state, 128)
+        self.fc2 = nn.Linear(128, n_action)
+
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+Обучение модели
+Агент обучается с использованием ε-жадной стратегии, и его вознаграждение отслеживается:
+
+n_episode = 500
+best_total_reward = 0
+best_weight = [param.data.clone() for param in model.parameters()]
+
+for episode in range(n_episode):
+    total_reward = run_episode_with_model(env, model)
+    print('Эпизод {}: {}'.format(episode + 1, total_reward))
+Запись и отображение видео
+Код также позволяет записывать видео с наилучшей моделью и отображать его:
+
+def save_video(frames, filename):
+    height, width, _ = frames[0].shape
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(filename, fourcc, 30, (width, height))
+
+    for frame in frames:
+        out.write(frame)
+    out.release()
+
+# Запись видео с наилучшей моделью
+video_filename = "best_episode.mp4"
+total_reward, frames = run_episode_with_video(env, model_eval)
+save_video(frames, video_filename)
+
+print(f"Лучшее вознаграждение: {total_reward}")
+
+# Функция для отображения видео
+def display_video(filename):
+    video_html = f'''
+    <video width="640" height="480" controls>
+        <source src="{filename}" type="video/mp4">
+        Your browser does not support the video tag.
+    </video>
+    '''
+    return HTML(video_html)
+
+# Отобразите записанное видео
+display_video(video_filename)
+Заключение
+В этом проекте вы узнали, как создать и обучить агента для игры в Ms. Pacman с использованием библиотеки Gymnasium. Мы рассмотрели установку необходимых библиотек, создание среды, обучение модели с использованием нейронной сети и запись видео с наилучшей моделью. Данный код предоставляет хорошую основу для дальнейших экспериментов и улучшений в области обучения с подкреплением.

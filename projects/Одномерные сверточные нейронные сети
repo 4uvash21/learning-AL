@@ -1,0 +1,307 @@
+
+from keras.models import Sequential
+from keras.utils import get_file, to_categorical
+from keras.layers import Embedding, Flatten, Dense, SpatialDropout1D, BatchNormalization, Dropout, SimpleRNN
+from keras.layers import GRU, LSTM, Bidirectional, Conv1D, MaxPooling1D, GlobalMaxPooling1D
+
+from tensorflow.keras.preprocessing.text import Tokenizer
+
+import os   # Модуль для работы с файловой системой
+
+import glob # Вспомогательный модуль для работы с файловой системой
+import numpy as np
+
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay # Для работы с матрицей ошибок
+
+import matplotlib.pyplot as plt
+%matplotlib inline
+
+!wget https://storage.yandexcloud.net/natasha-navec/packs/navec_hudlit_v1_12B_500K_300d_100q.tar
+
+!pip install navec
+
+from navec import Navec
+navec = Navec.load('navec_hudlit_v1_12B_500K_300d_100q.tar')
+
+data_path = get_file(
+    "russian_literature.zip",
+    "https://storage.yandexcloud.net/academy.ai/russian_literature.zip"
+)
+
+# Разархивируем датасета во временную папку 'dataset'
+!unzip -qo "{data_path}" -d ./dataset
+
+FILE_DIR_POEMS = './dataset/poems'
+file_list_poems = os.listdir(FILE_DIR_POEMS)
+print("Поэты:")
+print(file_list_poems)
+
+FILE_DIR_PROSE = './dataset/prose'
+file_list_prose = os.listdir(FILE_DIR_PROSE)
+print("Прозаики:")
+print(file_list_prose)
+
+CLASS_LIST = list(set(file_list_poems + file_list_prose))
+
+all_texts = {} # Собираем в словарь весь датасет
+
+for author in CLASS_LIST:
+    all_texts[author] = '' # Инициализируем пустой строкой новый ключ словаря
+    for path in glob.glob('./dataset/prose/{}/*.txt'.format(author)) +  glob.glob('./dataset/poems/{}/*.txt'.format(author)): # Поиск файлов по шаблону
+        with open(f'{path}', 'r', errors='ignore') as f: # игнорируем ошибки (например символы из другой кодировки)
+            # Загрузка содержимого файла в строку
+            text = f.read()
+
+        all_texts[author]  += ' ' + text.replace('\n', ' ') # Заменяем символ перехода на новую строку пробелом
+
+embedding_dim = 300    # размерность векторов эмбединга (300d в имени эмбединга)
+max_words = 15000      # Количество слов, рассматриваемых как признаки
+
+# Используется встроенный в Keras токенизатор для разбиения текста и построения частотного словаря
+tokenizer = Tokenizer(num_words=max_words,
+                      filters='!"#$%&()*+,-–—./…:;<=>?@[\\]^_`{|}~«»\t\n\xa0\ufeff',
+                      lower=True, split=' ', char_level=False)
+
+
+# Построение частотного словаря по текстам
+tokenizer.fit_on_texts(all_texts.values())
+
+seq_train = tokenizer.texts_to_sequences(all_texts.values())
+
+# используем генератор цикла для получения длины текстов по каждому автору
+total = sum(len(i) for i in seq_train)
+print(f'Датасет состоит из {total} слов')
+
+print('Общая выборка по писателям (по словам):')
+mean_list = np.array([])
+for author in CLASS_LIST:
+    cls = CLASS_LIST.index(author)
+    print(f'{author} - {len(seq_train[cls])} слов, доля в общей базе: {len(seq_train[cls])/total*100 :.2f}%')
+    mean_list = np.append(mean_list, len(seq_train[cls]))
+
+print('Среднее значение слов: ', np.round(mean_list.mean()))
+print('Медианное значение слов: ', np.median(mean_list))
+
+
+median = int(np.median(mean_list)) # Зафиксировали медианное значение
+CLASS_LIST_BALANCE = [] # Сбалансированный набор меток
+seq_train_balance = []
+for author in CLASS_LIST:
+    cls = CLASS_LIST.index(author)
+    if len(seq_train[cls]) > median * 0.6:
+      seq_train_balance.append(seq_train[cls][:median])
+      CLASS_LIST_BALANCE.append(author)
+
+# используем генератор цикла для получения длины текстов по каждому автору
+total = sum(len(i) for i in seq_train_balance)
+print(f'Датасет состоит из {total} слов')
+
+print('Общая выборка по писателям (по словам):')
+mean_list = np.array([])
+for author in CLASS_LIST_BALANCE:
+    cls = CLASS_LIST_BALANCE.index(author)
+    print(f'{author} - {len(seq_train_balance[cls])} слов, доля в общей базе: {len(seq_train_balance[cls])/total*100 :.2f}%')
+    mean_list = np.append(mean_list, len(seq_train_balance[cls]))
+
+print('Среднее значение слов: ', np.round(mean_list.mean()))
+print('Медианное значение слов: ', np.median(mean_list))
+
+fig, ax = plt.subplots()
+ax.pie([len(i) for i in seq_train_balance], # формируем список значений как длина символов текста каждого автора
+       labels=CLASS_LIST_BALANCE,                    # список меток
+       pctdistance=1.2,                      # дистанция размещения % (1 - граница окружности)
+       labeldistance=1.4,                    # размещение меток (1 - граница окружности)
+       autopct='%1.2f%%'                     # формат для % (2 знака после запятой)
+      )
+plt.show()
+
+WIN_SIZE = 1000   # Ширина окна в токенах
+WIN_STEP = 100    # Шаг окна в токенах
+
+# Функция разбиения последовательности на отрезки скользящим окном
+# Последовательность разбивается на части до последнего полного окна
+# Параметры:
+# sequence - последовательность токенов
+# win_size - размер окна
+# step - шаг окна
+def seq_split(sequence, win_size, step):
+    # Делим строку на отрезки с помощью генератора цикла
+    return [sequence[i:i + win_size] for i in range(0, len(sequence) - win_size + 1, step)]
+
+def seq_vectorize(
+    seq_list,   # Последовательность
+    test_split, # Доля на тестовую выборку
+    class_list, # Список классов
+    win_size,   # Ширина скользящего окна
+    step        # Шаг скользящего окна
+):
+
+    # Списки для результирующих данных
+    x_train, y_train, x_test, y_test =  [], [], [], []
+
+    # Пробежимся по всем классам:
+    for class_item in class_list:
+        # Получим индекс класса
+        cls = class_list.index(class_item)
+
+        # Пороговое значение индекса для разбивки на тестовую и обучающую выборки
+        gate_split = int(len(seq_list[cls]) * (1-test_split))
+
+        # Разбиваем последовательность токенов класса на отрезки
+        vectors_train = seq_split(seq_list[cls][:gate_split], win_size, step) # последовательность до порога попадет в обучающую выборку
+        vectors_test = seq_split(seq_list[cls][gate_split:], win_size, step)  # последовательность после порога попадет в тестовую выборку
+
+        # Добавляем отрезки в выборку
+        x_train += vectors_train
+        x_test += vectors_test
+
+        # Для всех отрезков класса добавляем метки класса в виде one-hot-encoding
+        # Каждую метку берем len(vectors) раз, так она одинакова для всех выборок одного класса
+        y_train += [to_categorical(cls, len(class_list))] * len(vectors_train)
+        y_test += [to_categorical(cls, len(class_list))] * len(vectors_test)
+
+    # Возвращаем результатов как numpy-массивов
+    return np.array(x_train), np.array(y_train), np.array(x_test), np.array(y_test)
+
+x_train, y_train, x_test, y_test = seq_vectorize(seq_train_balance, 0.1, CLASS_LIST_BALANCE, WIN_SIZE, WIN_STEP)
+
+# Вывод графиков точности и ошибки
+def show_plot(history, title=''):
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 5))
+    fig.suptitle('График процесса обучения модели: '+title)
+    ax1.plot(history.history['accuracy'],
+               label='График точности на обучающей выборке')
+    ax1.plot(history.history['val_accuracy'],
+               label='График точности на проверочной выборке')
+    ax1.xaxis.get_major_locator().set_params(integer=True) # На оси х показываем целые числа
+    ax1.set_xlabel('Эпоха обучения')
+    ax1.set_ylabel('График точности')
+    ax1.legend()
+
+    ax2.plot(history.history['loss'],
+               label='Ошибка на обучающей выборке')
+    ax2.plot(history.history['val_loss'],
+               label='Ошибка на проверочной выборке')
+    ax2.xaxis.get_major_locator().set_params(integer=True) # На оси х показываем целые числа
+    ax2.set_xlabel('Эпоха обучения')
+    ax2.set_ylabel('Ошибка')
+    ax2.legend()
+    plt.show()
+
+# Функция вывода предсказанных значений
+def show_confusion_matrix(y_true, y_pred, class_labels):
+    # Матрица ошибок
+    cm = confusion_matrix(np.argmax(y_true, axis=1),
+                          np.argmax(y_pred, axis=1),
+                          normalize='true')
+    # Округление значений матрицы ошибок
+    cm = np.around(cm, 3)
+
+    # Отрисовка матрицы ошибок
+    fig, ax = plt.subplots(figsize=(10, 10))
+    ax.set_title(f'Матрица ошибок', fontsize=18)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=class_labels)
+    disp.plot(ax=ax)
+    plt.gca().images[-1].colorbar.remove()  # Убираем ненужную цветовую шкалу
+    plt.xlabel('Предсказанные классы', fontsize=16)
+    plt.ylabel('Верные классы', fontsize=16)
+    fig.autofmt_xdate(rotation=45)          # Наклон меток горизонтальной оси
+    plt.show()
+
+
+    # Средняя точность распознавания определяется как среднее диагональных элементов матрицы ошибок
+    print('\nСредняя точность распознавания: {:3.0f}%'.format(100. * cm.diagonal().mean()))
+
+from keras.layers import Embedding
+
+def loadEmbedding(model):
+    word_index = tokenizer.word_index
+    embeddings_index = navec
+
+    embedding_matrix = np.zeros((max_words, embedding_dim))
+    for word, i in word_index.items():
+        if i < max_words:
+            embedding_vector = embeddings_index.get(word)
+            if embedding_vector is not None:
+                embedding_matrix[i] = embedding_vector
+
+    # Создаем новый слой Embedding с предобученными весами
+    new_embedding_layer = Embedding(
+        input_dim=max_words,
+        output_dim=embedding_dim,
+        weights=[embedding_matrix],
+        input_length=max_words,
+        trainable=False
+    )
+
+    # Заменяем старый слой Embedding на новый
+    model.layers[0] = new_embedding_layer
+
+    return model
+
+
+model_MIX = Sequential()
+model_MIX.add(Embedding(max_words, embedding_dim, input_length=WIN_SIZE))
+model_MIX.add(SpatialDropout1D(0.3))
+model_MIX.add(BatchNormalization())
+
+# Два двунаправленных рекуррентных слоя LSTM
+model_MIX.add(Bidirectional(LSTM(8, return_sequences=True)))
+model_MIX.add(Bidirectional(LSTM(8, return_sequences=True)))
+model_MIX.add(Dropout(0.3))
+model_MIX.add(BatchNormalization())
+
+# Два рекуррентных слоя GRU
+model_MIX.add(GRU(16, return_sequences=True, reset_after=True))
+model_MIX.add(GRU(16, reset_after=True))
+model_MIX.add(Dropout(0.3))
+model_MIX.add(BatchNormalization())
+
+# Дополнительный полносвязный слой
+model_MIX.add(Dense(100, activation='relu'))
+model_MIX.add(Dropout(0.3))
+model_MIX.add(BatchNormalization())
+model_MIX.add(Dense(len(CLASS_LIST_BALANCE), activation='softmax'))
+
+from keras.callbacks import EarlyStopping, ModelCheckpoint
+
+# Определяем путь для сохранения модели
+checkpoint_path = "best_model_MIX.keras"
+
+# Создаем колбек ModelCheckpoint
+checkpoint_callback = ModelCheckpoint(
+    filepath=checkpoint_path,
+    monitor='val_accuracy',  # Мониторим метрику val_accuracy
+    save_best_only=True,     # Сохраняем только лучшую модель
+    mode='max',              # Максимизируем метрику (так как это accuracy)
+    verbose=1                # Выводим информацию о сохранении модели
+)
+
+# Создаем колбек EarlyStopping
+early_stopping_callback = EarlyStopping(
+    monitor='val_accuracy',  # Мониторим метрику val_accuracy
+    patience=5,              # Количество эпох без улучшения, после которого обучение остановится
+    restore_best_weights=True,  # Восстанавливаем веса лучшей эпохи
+    verbose=1                # Выводим информацию о срабатывании колбека
+)
+
+model_MIX = loadEmbedding(model_MIX)
+
+model_MIX.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+history_mix = model_MIX.fit(x_train, y_train, epochs=25, batch_size=128, validation_data=(x_test, y_test), callbacks=[checkpoint_callback, early_stopping_callback] )
+
+show_plot(history_mix, 'Embedding(Natasha) + BLSTM(8)x2 + GRU(16)x2 + Dropout(0.3) + Dense(100)')
+
+y_pred_mix = model_MIX.predict(x_test)
+show_confusion_matrix(y_test, y_pred_mix, CLASS_LIST_BALANCE)
+
+from keras.preprocessing.sequence import pad_sequences
+
+your_text = " Села муха на варенье вот и все стихотворение"  # шутник моя изуминка
+your_text_seq = tokenizer.texts_to_sequences([your_text])
+your_text_seq = pad_sequences(your_text_seq, maxlen=WIN_SIZE)
+prediction = model_MIX.predict(your_text_seq)
+predicted_class = CLASS_LIST_BALANCE[np.argmax(prediction)]
+
+
+print(f"Ваш текст похож на текст автора: {predicted_class}")

@@ -1,0 +1,75 @@
+# Обнаружение дорожных знаков с использованием YOLO
+
+Этот проект демонстрирует, как использовать модель YOLO для обнаружения дорожных знаков. В этом репозитории представлен код, который включает в себя установку необходимых библиотек, загрузку данных, обучение модели и визуализацию результатов.
+
+## Установка
+
+Перед запуском кода, убедитесь, что у вас установлены необходимые библиотеки. Вы можете установить библиотеку `ultralytics` с помощью следующей команды:
+
+```bash
+!pip install ultralytics
+Загрузка и подготовка данных
+Код загружает набор данных для обнаружения дорожных знаков и распаковывает его:
+
+!wget # загрузите свой датасет
+!unzip -qo "если zip-файл"
+После этого указывается путь к файлу конфигурации данных:
+
+yaml_path = '/content/car/data.yaml'
+Обучение модели
+Модель YOLO обучается на загруженных данных. Вы можете настроить количество эпох, размер пакета и размер входного изображения:
+
+model = YOLO('yolo11s.pt')
+
+results = model.train(
+    data=yaml_path,   # путь к конфигурационному файлу
+    epochs=15,        # число эпох
+    batch=32,         # размер пакета
+    imgsz=640,        # размер входного изображения
+    plots=True        # сохранять графики
+)
+Визуализация результатов
+Функция result_train отображает изображения, полученные в процессе обучения, а также графики, такие как матрица путаницы:
+
+def result_train(path):
+    img = cv2.imread(path)
+    plt.figure(figsize=(10,10), dpi=200)
+    plt.imshow(img)
+
+data_dir = "./runs/detect/train"
+img_dir = os.path.join(data_dir, 'train_batch*.jpg')
+files = glob.glob(img_dir)
+
+for image in files:
+    result_train(image)
+
+# Отображение матрицы путаницы
+img_dir = os.path.join(data_dir, 'confusion_matrix_normalized.png')
+result_train(img_dir)
+Также отображаются графики обучения:
+
+img_dir = os.path.join(data_dir, '*curve*.png')
+files = glob.glob(img_dir)
+
+for image in files:
+    result_train(image)
+Запуск TensorBoard
+Вы можете запустить TensorBoard для визуализации метрик обучения:
+
+%load_ext tensorboard
+%tensorboard --logdir='./runs/detect/train'
+Предсказание на видео
+Код также позволяет делать предсказания на видео. Вы можете указать путь к видео и сохранить результаты:
+
+example_video_path = '/content/video.mp4'
+video_output = model.predict(source=example_video_path, conf=0.6, save=True)
+Визуализация видео с предсказаниями
+Для отображения выходного видео с предсказаниями используется библиотека moviepy:
+
+from moviepy.editor import *
+
+path = "./runs/detect/train2/video.avi"
+clip = VideoFileClip(path)
+clip.ipython_display(width=960)
+Заключение
+Этот проект предоставляет базовый пример использования YOLO для обнаружения дорожных знаков. Вы можете изменить параметры обучения и конфигурации в соответствии с вашими потребностями.

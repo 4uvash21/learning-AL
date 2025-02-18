@@ -1,0 +1,274 @@
+Этот проект представляет собой реализацию модели сегментации изображений с использованием архитектуры U-Net для обработки аэрофотоснимков.
+
+import tensorflow as tf
+import keras
+from keras.layers import Input, Conv2D, MaxPooling2D, Activation, ReLU, Rescaling
+from keras.layers import BatchNormalization, Conv2DTranspose, Concatenate
+from keras.models import Model
+from keras.optimizers import Adam
+from keras.preprocessing.image import load_img
+from keras.utils import to_categorical
+import numpy as np
+import pandas as pd
+import os
+import albumentations as A
+from keras.callbacks import EarlyStopping, ModelCheckpoint
+
+import matplotlib.pyplot as plt
+%matplotlib inline
+
+!wget https://storage.yandexcloud.net/academy.ai/CV/aerial_images.zip
+
+!unzip -qo "aerial_images.zip" -d ./dataset
+
+dataset_path = './dataset/dataset/semantic_drone_dataset'
+
+image_dir = 'original_images'
+label_dir = 'label_images_semantic'
+
+
+def display(display_list):
+  plt.figure(figsize=(15, 15))
+
+  title = ['Входное изображение', 'Оригинальная маска', 'Предсказанная маска']
+
+  for i in range(len(display_list)):
+    plt.subplot(1, len(display_list), i+1)
+    plt.title(title[i])
+    plt.imshow(tf.keras.utils.array_to_img(display_list[0]))            # отображаем картинку
+    plt.imshow(tf.keras.utils.array_to_img(display_list[i]),alpha=0.5)  # отображаем маску с прозрачностью 50%
+    plt.axis('off')
+  plt.show()                                                            # выводим график целиком
+
+original_image = os.path.join(dataset_path, image_dir, '001.jpg')       # путь до ориганального изображения
+label_image_semantic = os.path.join(dataset_path, label_dir, '001.png') # путь до маски
+
+fig, axs = plt.subplots(1, 2, figsize=(16, 8))                          # задаем область для построения (канвас)
+
+img = np.array(load_img(original_image, target_size=(256, 256), color_mode='rgb'))   # загружаем оригинальное изображение как RGB с 3 каналами
+mask = np.array(load_img(label_image_semantic, target_size=(256, 256), color_mode='grayscale'))  # загружаем маску как "отеннки серого", т.е. в один канал
+
+axs[0].imshow(img)  # отрисовываем оригинальное изображение
+axs[0].grid(False)
+
+axs[1].imshow(mask) # отрисовываем маску (одноканальное изображение, каждый класс отображается как отдельный цвет)
+axs[1].grid(False)
+
+csv = os.path.join('./dataset', 'class_dict_seg.csv')
+label_colors = pd.read_csv(csv)
+
+NUM_CLASSES = len(label_colors) # число классов берем как число используемых цветов для сегментации (строк), определенные в файле
+IMG_SIZE = (256, 256)
+
+for index,label in enumerate(label_colors.name): # перебираем все цвета
+        plt.subplot(6,4,index+1)
+        (r,g,b)=label_colors.iloc[index].values[1:] # извлекаем цвета для трех каналов
+        img_ = np.array([[[r,g,b],[r,g,b],[r,g,b],[r,g,b]]]) # искусственно собираем картинку из трех цветов и 4-х точек
+        plt.title(label)  # отображаем заголовок
+        plt.imshow(img_)  # отображаем изображение
+        plt.axis('off')   # отключаем оси
+
+input_img_path = sorted(
+    [
+        os.path.join(dataset_path, image_dir, fname)
+        for fname in os.listdir(os.path.join(dataset_path, image_dir))
+        if fname.endswith(".jpg")
+    ]
+)
+
+target_img_path = sorted(
+    [
+        os.path.join(dataset_path, label_dir, fname)
+        for fname in os.listdir(os.path.join(dataset_path, label_dir))
+        if fname.endswith(".png")
+    ]
+)
+
+# Определим batch_size равный 16.
+# Как опеределили? Запустили обучение на 8, 16, 32 и посмотрели на точность обучения, скорость обучения и потребляемые ресурсы
+# Наиболее оптимальным оказался вариант с размером пакета в 16 образцов
+batch_size = 16
+img_size = IMG_SIZE
+num_classes = NUM_CLASSES
+
+# Генератор для перебора данных (в виде массивов Numpy)
+
+class datasetGenerator(keras.utils.Sequence):
+    def __init__(self, batch_size, img_size, input_img_path, target_img_path=None, num_classes=NUM_CLASSES, validation=False):
+        self.batch_size = batch_size
+        self.img_size = img_size
+        self.input_img_path = input_img_path
+        self.target_img_path = target_img_path
+        self.validation = validation
+
+    def __len__(self):
+        return len(self.target_img_path) // self.batch_size
+
+    def __getitem__(self, idx):
+        batch_input_img_path = self.input_img_path[idx * self.batch_size:(idx + 1) * self.batch_size]
+        batch_target_img_path = self.target_img_path[idx * self.batch_size:(idx + 1) * self.batch_size]
+
+        x = np.zeros((self.batch_size, *self.img_size, 3), dtype="float32")
+        y = np.zeros((self.batch_size, *self.img_size, num_classes), dtype="uint8")
+
+        for i, paths in enumerate(zip(batch_input_img_path, batch_target_img_path)):
+            img = np.array(load_img(paths[0], target_size=self.img_size, color_mode='rgb'))
+            mask = np.array(load_img(paths[1], target_size=self.img_size, color_mode='grayscale'))
+
+            if not self.validation:
+                transform = A.Compose([
+                    A.HorizontalFlip(p=0.5),
+                    A.RandomRotate90(p=0.5),
+                    A.RandomBrightnessContrast(p=0.2),
+                    A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=15, p=0.5)
+                ])
+                transformed = transform(image=img, mask=mask)
+                img = transformed["image"]
+                mask = transformed["mask"]
+
+            x[i] = img / 255.0
+            y[i] = to_categorical(mask, num_classes=num_classes)
+
+        return x, y
+
+
+import random
+
+seed = 1523
+random.Random(seed).shuffle(input_img_path)
+random.Random(seed).shuffle(target_img_path)
+
+val_samples = 40
+
+# Расщепим наш датасет  на обучающую и проверочные выборки
+train_input_img_path = input_img_path[:-val_samples]
+train_target_img_path = target_img_path[:-val_samples]
+val_input_img_path = input_img_path[-val_samples:]
+val_target_img_path = target_img_path[-val_samples:]
+
+train_gen = datasetGenerator(batch_size, img_size, train_input_img_path, train_target_img_path, num_classes)
+
+val_gen = datasetGenerator(batch_size, img_size, val_input_img_path, val_target_img_path, num_classes, validation = True)
+
+def convolution_operation(entered_input, filters=64):
+
+    conv1 = Conv2D(filters, kernel_size = (3,3), padding = "same")(entered_input)
+    batch_norm1 = BatchNormalization()(conv1)
+    acti1 = ReLU()(batch_norm1)
+
+
+    conv2 = Conv2D(filters, kernel_size = (3,3), padding = "same")(acti1)
+    batch_norm2 = BatchNormalization()(conv2)
+    acti2 = ReLU()(batch_norm2)
+
+    return acti2
+
+# Функция кодировщика
+# На входе 2 параметра - предыдущий слой и число фильтров (генерируемых карт признаков)
+def encoder(entered_input, filters=64):
+
+    encod1 = convolution_operation(entered_input, filters)  # функция свертки - 2 синих блока
+    MaxPool1 = MaxPooling2D(strides = (2,2))(encod1)        # зеленый блок
+    return encod1, MaxPool1 # функция возвращает латеральное соединение и выход из слоя
+
+# Функция декодировщика
+# На входе 3 параметра - предыдущий слой и латеральное соединение и число фильтров (генерируемых карт признаков)
+def decoder(entered_input, skip, filters=64):
+    Upsample = Conv2DTranspose(filters, (2, 2), strides=2, padding="same")(entered_input) # красный блок
+    Connect_Skip = Concatenate()([Upsample, skip])                                        # белый блок (объединение латерального соединения и выхода предыдущего слоя)
+    out = convolution_operation(Connect_Skip, filters)                                    # функция свертки - 2 синих блока
+    return out # функция возвращает выход из слоя
+
+# Наша интерпретация модели U-net
+def U_Net(img_size, num_classes):
+    # Входной слой - желтый блок
+    inputs = Input(img_size)
+
+    # Задаем блоки кодировщика и латеральные соединения
+    skip1, encoder_1 = encoder(inputs, 64)
+    skip2, encoder_2 = encoder(encoder_1, 64*2)
+    skip3, encoder_3 = encoder(encoder_2, 64*4)
+    skip4, encoder_4 = encoder(encoder_3, 64*8)
+
+    # Бутылочное горлышка задаем 2-мя синими блоками
+    conv_block = convolution_operation(encoder_4, 64*16)
+
+    # Задаем блоки декодировщика и передаем ему латеральные соединения от кодировщиков
+    decoder_1 = decoder(conv_block, skip4, 64*8)
+    decoder_2 = decoder(decoder_1, skip3, 64*4)
+    decoder_3 = decoder(decoder_2, skip2, 64*2)
+    decoder_4 = decoder(decoder_3, skip1, 64)
+
+    # Выходной слой (фиолетовый блок), его конфигурация зависит от решаемой задачи
+    outputs = Conv2D(num_classes, kernel_size = (1, 1), padding="same", activation="softmax")(decoder_4)
+
+    model = Model(inputs, outputs)
+    return model
+
+num_classes = NUM_CLASSES # 24 класса объектов
+input_shape = (IMG_SIZE[0], IMG_SIZE[1], 3) # размер к которому преобразуем изображение, 3 канала - RGB
+model = U_Net(input_shape, num_classes) # инициализируем модель
+
+model.compile(
+    optimizer='adam' ,
+    loss="categorical_crossentropy",
+    metrics=['accuracy']
+)
+
+callbacks = [
+    keras.callbacks.ModelCheckpoint("segmentation.keras", monitor='val_loss', save_best_only=True)
+]
+
+model.summary() # отчет о структуре модели
+
+# график структуры модели
+tf.keras.utils.plot_model(model, "model.png", show_shapes=True, show_dtype=False, show_layer_names=True, rankdir='TB', expand_nested=False, dpi=70)
+
+epochs = 50
+history = model.fit(train_gen,
+                    validation_data=val_gen,
+                    epochs=epochs,
+                    batch_size=batch_size,
+                    callbacks=callbacks
+                   )
+
+acc = history.history['accuracy']                              # данные о точности на обучающей выборке
+val_acc = history.history['val_accuracy']                      # данные о точности на проверочной выборке
+loss = history.history['loss']                                             # данные об ошибке на обучающей выборке
+val_loss = history.history['val_loss']                                     # данные об ошибке на проверочной выборке
+epochs = range(1, len(acc) + 1)                                            # массив со значениями для оси абсцисс (Х)
+plt.plot(epochs, acc, 'r', label='Точность на обучающей выборке')          #  строим график точность на обучающей выборке
+plt.plot(epochs, val_acc, 'bo', label='Точность на проверочной выборке')   #  строим график точность на проверочной выборке
+plt.title('График точности на обучающей и проверочной выборках')           #  заголовок графика
+plt.legend()                                                               #  легенда графика
+plt.figure()                                                               #  создаем новую фигуру (полотно для графика)
+plt.plot(epochs, loss, 'r', label='Потери на обучающей выборке')           #  строим график потерь (ошибки) на обучающей выборке
+plt.plot(epochs, val_loss, 'bo', label='Потери на валидационной выборке')  #  строим график потерь на проверочной выборке
+plt.title('График потерь на обучающей и проверочной выборках')             #  заголовок графика
+plt.legend()                                                               #  легенда графика
+plt.show()
+
+def display(display_list):
+  plt.figure(figsize=(15, 15))
+
+  title = ['Входное изображение', 'Оригинальная маска', 'Предсказанная маска']
+
+  for i in range(len(display_list)):
+    plt.subplot(1, len(display_list), i+1)
+    plt.title(title[i])
+    plt.imshow(display_list[0])            # отображаем картинку
+    plt.imshow(display_list[i],alpha=0.8)  # отображаем маску с прозрачностью 80%
+    plt.axis('off')
+  plt.show()
+
+for index in range(12):                  # выбираем 12 картинок и выводим их в цикле
+    img = np.array(load_img(val_input_img_path[index], target_size=(256, 256), color_mode='rgb')) # загружаем картинку для предсказания
+    mask = np.array(load_img(val_target_img_path[index], target_size=(256, 256), color_mode='grayscale')) # загружаем маску для сравнения с предсказанием
+
+    # Запускаем модель в режиме предсказания
+    test = model.predict(np.expand_dims(img, 0) / 255)
+
+    # Выбираем наиболее веротный класс
+    test = np.argmax(test, axis=-1)
+
+    display([img.reshape(1, 256, 256, 3)[0], mask, test[0]])  # передаем в функцию display изображение, оригинальную маску и предсказанную
