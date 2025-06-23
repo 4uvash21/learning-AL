@@ -1,0 +1,172 @@
+!pip install python-multipart
+
+!pip install uvicorn
+
+!pip install fastapi
+
+!pip install tensorflow
+
+
+import tensorflow as tf
+from tensorflow import keras
+from tensorflow.keras import layers
+import numpy as np
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+
+# Загрузка данных MNIST
+mnist = keras.datasets.mnist
+(X_train, y_train), (X_test, y_test) = mnist.load_data()
+
+# Нормализация данных
+X_train = X_train.astype('float32') / 255
+X_test = X_test.astype('float32') / 255
+
+# Изменение формы данных
+X_train = np.expand_dims(X_train, axis=-1)
+X_test = np.expand_dims(X_test, axis=-1)
+
+
+# Создание модели
+model = keras.Sequential([
+    layers.Flatten(input_shape=(28,28,1)),
+    layers.Dense(128,activation='relu'),
+    layers.Dropout(0.2),
+    layers.Dense(10, activation='softmax')
+])
+
+# Компиляция модели
+model.compile(optimizer='adam',
+              loss='sparse_categorical_crossentropy',
+              metrics=['accuracy'])
+
+# Обучение модели
+model.fit(X_train, y_train, epochs=5, validation_split=0.1)
+
+model.save('model.h5')
+
+!nohup uvicorn main:app --reload &
+# nohup и & - прописываются для запуска процесса в фоне (чтобы не блокировать Colab)
+# параметр --reload позволяет автоматически перезапускать uvicorn при изменениях в файле main.py
+
+!cat nohup.out
+
+%%writefile main.py
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import List, Dict
+import numpy as np
+from tensorflow import keras
+
+
+app = FastAPI()
+
+# Модель данных для товара
+class Item(BaseModel):
+    name: str
+    category: str
+    price: float
+    unit: str
+    quantity: int
+
+# Хранение списка товаров
+items: List[Item] = []
+
+@app.post("/items/", response_model=Item)
+async def create_item(item: Item):
+    items.append(item)
+    return item
+
+@app.get("/items/", response_model=List[Item])
+async def get_items():
+    return items
+
+@app.get("/expenses/", response_model=Dict[str, float])
+async def get_expenses():
+    expenses = {}
+    total = 0.0
+    for item in items:
+        if item.category in expenses:
+            expenses[item.category] += item.price * item.quantity
+        else:
+            expenses[item.category] = item.price * item.quantity
+        total += item.price * item.quantity
+    expenses["total"] = total
+    return expenses
+
+
+
+# Загрузка модели
+model = keras.models.load_model('model.h5')
+
+@app.post("/predict")
+async def predict(data: List[List[List[int]]]):
+    if not isinstance(data, list) or not all(isinstance(i, list) for i in data):
+        raise HTTPException(status_code=422, detail="Input must be a list of lists.")
+
+    # Проверка на размерность каждого изображения
+    if not all(len(i) == 28 and all(len(j) == 28 for j in i) for i in data):
+        raise HTTPException(status_code=422, detail="Each image must be a 28x28 list.")
+
+    try:
+        input_data = np.array(data).reshape(-1, 28, 28, 1)
+        prediction = model.predict(input_data)
+        return {"prediction": prediction.tolist()}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+import requests
+# Добавление товара
+url = "http://127.0.0.1:8000/items/"
+item_data = {
+    "name": "Яблоко",
+    "category": "Продовольствие",
+    "price": 50.0,
+    "unit": "кг",
+    "quantity": 2
+}
+response = requests.post(url, json=item_data)
+print(response.json())
+
+import requests
+# Добавление товара
+url = "http://127.0.0.1:8000/items/"
+item_data = {
+    "name": "Арбуз",
+    "category": "Продовольствие",
+    "price": 26.0,
+    "unit": "кг",
+    "quantity": 10
+}
+response = requests.post(url, json=item_data)
+print(response.json())
+
+# Получение всех товаров
+items_response = requests.get("http://127.0.0.1:8000/items/")
+print(items_response.json())
+
+
+
+# Получение расходов
+expenses_response = requests.get("http://127.0.0.1:8000/expenses/")
+print(expenses_response.json())
+
+import requests
+import numpy as np
+
+# URL вашего FastAPI сервера
+url = "http://127.0.0.1:8000/predict"
+
+# Генерация 20 образцов изображений размером 28x28
+data = np.random.randint(0, 256, (20, 28, 28)).astype(int)  # Целые числа от 0 до 255
+
+# Приведение к нужному формату: (20, 28, 28) без дополнительного измерения
+data = data.tolist()  # Преобразование в список
+
+# Отправка POST запроса
+response = requests.post(url, json=data)
+
+# Вывод ответа
+print(f"Статус код: {response.status_code}")
+print("Ответ:", response.json())
